@@ -20,6 +20,8 @@
     ped    : [valor 2 eixos, ..., valor 9 eixos]  (vazio = pedagio indisponivel)
     amb    : "P" producao / "H" homologacao (Repom)
     dt     : data/hora do calculo
+    pv     : {e: eixos, v: valor} - pedagio do VEICULO (vale-pedagio). Com ele, a tabela de 2 a 9 eixos
+             da lugar a um valor so
 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -174,7 +176,14 @@
   if (dados.rod) c.appendChild(el("div", "rod", dados.rod));
 
   var ped = dados.ped || [];
-  if (ped.length) {
+  if (dados.pv && Number(dados.pv.e) > 0) {
+    var pv = el("div", "num");
+    var dP = el("div");
+    dP.appendChild(el("b", null, "R$ " + moeda(Number(dados.pv.v) || 0)));
+    dP.appendChild(el("span", null, Number(dados.pv.v) > 0 ? "vale-pedagio, " + dados.pv.e + " eixos" : "nenhuma praca no trajeto"));
+    pv.appendChild(dP);
+    c.appendChild(pv);
+  } else if (ped.length) {
     var temValor = ped.some(function (v) { return Number(v) > 0; });
     if (!temValor) {
       c.appendChild(el("div", null, "Nenhuma praca de pedagio no trajeto."));
@@ -193,7 +202,7 @@
       c.appendChild(t);
     }
   } else {
-    c.appendChild(el("div", "aviso", "Pedagio indisponivel nesta consulta."));
+    c.appendChild(el("div", "aviso", "Pedagio nao calculado nesta consulta."));
   }
 
   var rod = el("div", "rodape");
