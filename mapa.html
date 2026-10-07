@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roteirizador - Rio Branco</title>
+<!--
+  Pagina FIXA do mapa do Roteirizador (Protheus). Nao contem dado da empresa nem chave de API.
+
+  O Protheus calcula a rota (OpenRouteService no servidor, pedagio na Repom) e abre esta pagina dentro
+  da tela passando tudo no proprio endereco, depois do "#":  mapa.html#<JSON em base64url>.
+  O que vem depois do "#" nao e enviado ao servidor que hospeda a pagina.
+
+  JSON esperado (v1):
+    o, d   : textos de origem e destino ("UBERABA/MG")
+    pts    : [[lat, lon, "nome"], ...]  origem, paradas e destino, para os marcadores
+    g      : tracado da rota, polyline codificada (precisao 5, formato do OpenRouteService)
+    km, min: distancia e tempo
+    rod    : rodovias (Repom)
+    ped    : [valor 2 eixos, ..., valor 9 eixos]  (vazio = pedagio indisponivel)
+    amb    : "P" producao / "H" homologacao (Repom)
+    dt     : data/hora do calculo
+-->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --barra: #1f2a36;
+    --texto: #1d2733;
+    --suave: #5b6876;
+    --linha: #e3e7ec;
+    --cartao: #ffffff;
+    --rota: #d9480f;
+    --fundo: #f4f6f8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "Segoe UI", Arial, sans-serif; color: var(--texto); background: var(--fundo); }
+  #topo {
+    position: absolute; top: 0; left: 0; right: 0; height: 52px;
+    background: var(--barra); display: flex; align-items: center; gap: 18px; padding: 0 16px; z-index: 1000;
+  }
+  #topo img { height: 30px; }
+  #topo .trecho { color: #fff; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #mapa { position: absolute; top: 52px; bottom: 0; left: 0; right: 0; }
+  #cartao {
+    position: absolute; top: 66px; right: 14px; width: 270px; max-height: calc(100% - 80px); overflow: auto;
+    background: var(--cartao); border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.18);
+    padding: 14px 16px; z-index: 1000; font-size: 13px;
+  }
+  .num { display: flex; gap: 18px; margin-bottom: 10px; }
+  .num div b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .num div span { color: var(--suave); font-size: 12px; }
+  .rod { color: var(--suave); margin-bottom: 12px; line-height: 1.35; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-weight: 600; color: var(--suave); font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--linha); }
+  td { padding: 4px 0; border-bottom: 1px solid var(--linha); }
+  td.v { text-align: right; }
+  .rodape { margin-top: 10px; color: var(--suave); font-size: 11px; line-height: 1.4; }
+  .aviso { color: #b42318; }
+  #erro { position: absolute; top: 52px; left: 0; right: 0; bottom: 0; display: none; align-items: center; justify-content: center; padding: 16px; text-align: center; color: var(--suave); }
+  @media (max-width: 640px) {
+    #cartao { top: auto; bottom: 12px; right: 12px; left: 12px; width: auto; max-height: 45%; }
+  }
+</style>
+</head>
+<body>
+<div id="topo">
+  <img src="https://gruporiobranco.com/wp-content/uploads/2026/06/Logotipo-Rio-Branco-Energias-PNG-branco.png" alt="Grupo Rio Branco">
+  <div class="trecho" id="trecho">Roteirizador</div>
+</div>
+<div id="mapa"></div>
+<div id="cartao" hidden></div>
+<div id="erro"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  function lerDados() {
+    var h = location.hash.replace(/^#/, "");
+    if (!h) return null;
+    var b64 = h.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return JSON.parse(new TextDecoder("utf-8").decode(bytes));
+  }
+
+  // Polyline codificada (algoritmo do Google, precisao 5) -> [[lat, lon], ...]
+  function decodificar(s) {
+    var pts = [], i = 0, lat = 0, lon = 0;
+    while (i < s.length) {
+      var r = 0, sh = 0, b;
+      do { b = s.charCodeAt(i++) - 63; r |= (b & 31) << sh; sh += 5; } while (b >= 32);
+      lat += (r & 1) ? ~(r >> 1) : (r >> 1);
+      r = 0; sh = 0;
+      do { b = s.charCodeAt(i++) - 63; r |= (b & 31) << sh; sh += 5; } while (b >= 32);
+      lon += (r & 1) ? ~(r >> 1) : (r >> 1);
+      pts.push([lat / 1e5, lon / 1e5]);
+    }
+    return pts;
+  }
+
+  function moeda(v) {
+    return Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function horas(min) {
+    min = Math.round(Number(min) || 0);
+    return Math.floor(min / 60) + "h" + String(min % 60).padStart(2, "0");
+  }
+
+  function el(tag, cls, txt) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (txt !== undefined) e.textContent = txt;
+    return e;
+  }
+
+  function mostrarErro(msg) {
+    var e = document.getElementById("erro");
+    e.textContent = msg;
+    e.style.display = "flex";
+  }
+
+  var dados;
+  try { dados = lerDados(); } catch (ex) { dados = null; }
+
+  if (!dados) {
+    mostrarErro("Este mapa abre pelo Protheus (Roteirizador). Nenhuma rota foi informada.");
+    return;
+  }
+
+  document.getElementById("trecho").textContent = (dados.o || "") + "  →  " + (dados.d || "");
+  document.title = (dados.o || "") + " → " + (dados.d || "") + " - Roteirizador";
+
+  // -- Mapa -------------------------------------------------------------------
+  var mapa = L.map("mapa", { zoomControl: true });
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: "&copy; OpenStreetMap"
+  }).addTo(mapa);
+
+  var limites = [];
+
+  if (dados.g) {
+    var linha = decodificar(dados.g);
+    L.polyline(linha, { color: getComputedStyle(document.documentElement).getPropertyValue("--rota").trim(), weight: 5, opacity: .9 }).addTo(mapa);
+    limites = limites.concat(linha);
+  }
+
+  (dados.pts || []).forEach(function (p, i, todos) {
+    var tipo = i === 0 ? "Origem" : (i === todos.length - 1 ? "Destino" : "Parada");
+    L.marker([p[0], p[1]]).addTo(mapa).bindPopup(tipo + ": " + (p[2] || ""));
+    limites.push([p[0], p[1]]);
+  });
+
+  if (limites.length) {
+    mapa.fitBounds(limites, { padding: [40, 40] });
+  } else {
+    mapa.setView([-15.8, -47.9], 4);
+  }
+
+  // -- Cartao com os numeros ---------------------------------------------------
+  var c = document.getElementById("cartao");
+
+  var num = el("div", "num");
+  var dK = el("div"); dK.appendChild(el("b", null, (Number(dados.km) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + " km")); dK.appendChild(el("span", null, "distancia"));
+  var dT = el("div"); dT.appendChild(el("b", null, horas(dados.min))); dT.appendChild(el("span", null, "caminhao, sem paradas"));
+  num.appendChild(dK); num.appendChild(dT);
+  c.appendChild(num);
+
+  if (dados.rod) c.appendChild(el("div", "rod", dados.rod));
+
+  var ped = dados.ped || [];
+  if (ped.length) {
+    var temValor = ped.some(function (v) { return Number(v) > 0; });
+    if (!temValor) {
+      c.appendChild(el("div", null, "Nenhuma praca de pedagio no trajeto."));
+    } else {
+      var t = el("table");
+      var cab = el("tr");
+      cab.appendChild(el("th", null, "Pedagio, so ida"));
+      cab.appendChild(el("th", "v", "R$"));
+      t.appendChild(cab);
+      ped.forEach(function (v, i) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, (i + 2) + " eixos"));
+        tr.appendChild(el("td", "v", moeda(v)));
+        t.appendChild(tr);
+      });
+      c.appendChild(t);
+    }
+  } else {
+    c.appendChild(el("div", "aviso", "Pedagio indisponivel nesta consulta."));
+  }
+
+  var rod = el("div", "rodape");
+  rod.textContent = "Pedagio: Repom" + (dados.amb === "H" ? " (HOMOLOGACAO)" : "") +
+                    ". Rota: OpenRouteService, perfil caminhao, do centro de um municipio ao centro do outro." +
+                    (dados.dt ? " Calculado em " + dados.dt + "." : "");
+  c.appendChild(rod);
+
+  c.hidden = false;
+})();
+</script>
+</body>
+</html>
